@@ -1,0 +1,1881 @@
+# =============================================================================
+#  COMANCHE // MJ-4.0 TERRAIN MONITOR
+#  Amber-phosphor vehicle terminal for the Hosyond / LCDWiki ES3C35P
+#  (ESP32-S3 N16R8, 320x480 ST77922 QSPI panel, ST7123 touch)
+#
+#  Hardware reference .... docs/HARDWARE.md
+#  Driver inventory ...... docs/DRIVERS.md
+#  Build / flash ......... docs/BUILD.md
+#  Performance notes ..... docs/PERFORMANCE.md
+#  Jeep model notes ...... docs/MODEL.md
+# =============================================================================
+
+substitutions:
+  name: comanche-monitor
+  friendly_name: Comanche Monitor
+  fw_version: "0.2.0"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  comment: "MJ-4.0 terrain monitor"
+  includes:
+    - comanche_ui.h
+  on_boot:
+    # 600 runs after the LEDC output (800) and light state (799) are ready.
+    # GPIO41 is active HIGH and mipi_spi has no backlight support.
+    - priority: 600
+      then:
+        - light.turn_on:
+            id: backlight
+            brightness: 100%
+        - lambda: id(g_mesh_last_us) = cm::us();
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
+  flash_mode: qio
+  cpu_frequency: 240MHz
+  partitions: partitions.csv
+  framework:
+    type: esp-idf
+    advanced:
+      # PERF keeps the LVGL/software-rotation loops fast; SIZE is the ESPHome
+      # default but leaves measurable frame time on the table.
+      compiler_optimization: PERF
+      assertion_level: DISABLE
+      # Only build the generic SPI flash driver.  The board's Zbit part works
+      # with it and this frees IRAM, which is the tightest memory region here.
+      flash_chip: generic
+    sdkconfig_options:
+      CONFIG_ESPTOOLPY_FLASHFREQ_80M: "y"
+      # 64 KB data cache is useful because LVGL reads masks and draw buffers
+      # out of PSRAM during software rotation.
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_FREERTOS_HZ: "1000"
+
+psram:
+  mode: octal
+  speed: 80MHz
+  ignore_not_found: false
+
+logger:
+  level: INFO
+  hardware_uart: USB_SERIAL_JTAG
+  logs:
+    lvgl: WARN
+    display: WARN
+    wifi: WARN
+    api: WARN
+    mdns: WARN
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none
+  fast_connect: true
+  reboot_timeout: 0s          # standalone dash: never reboot because Wi-Fi is down
+  ap:
+    ssid: "Comanche-Monitor"
+    password: !secret ap_password
+
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_key
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+    encryption:
+      key: !secret api_key
+
+# ----------------------------------------------------------------- hardware
+spi:
+  - id: lcd_bus
+    type: quad
+    clk_pin: GPIO12
+    data_pins: [GPIO11, GPIO13, GPIO14, GPIO9]
+
+i2c:
+  - id: bus_a
+    sda: GPIO38
+    scl: GPIO39
+    frequency: 400kHz
+
+output:
+  - platform: ledc
+    id: backlight_pwm
+    pin: GPIO41          # active HIGH
+    frequency: 1000Hz
+
+light:
+  - platform: monochromatic
+    id: backlight
+    name: "Backlight"
+    output: backlight_pwm
+    restore_mode: ALWAYS_OFF   # on_boot drives it
+
+display:
+  - platform: mipi_spi
+    id: lcd
+    spi_id: lcd_bus
+    model: CUSTOM
+    bus_mode: quad
+    cs_pin: GPIO10
+    # 40 MHz is comfortably inside the ST77922's 62.5 MHz QSPI write limit
+    # (16 ns serial clock cycle, datasheet section 7.4.5).  80 MHz is out of
+    # specification and the panel is already fast enough at 40 MHz.
+    data_rate: 40MHz
+    update_interval: never
+    dimensions:
+      width: 320         # NATIVE portrait; LVGL does the 270 rotation
+      height: 480
+    color_order: RGB
+    invert_colors: true
+    draw_rounding: 4
+    # The MADCTL hardware-rotation path does not take on this unit (image comes
+    # out sideways). Software rotation costs CPU per flushed rectangle but is
+    # correct on every ST77922 revision. Verified on hardware.
+    transform: disabled
+    <<: !include st77922-init-sequence.yaml
+
+touchscreen:
+  - platform: st7123
+    id: touch
+    i2c_id: bus_a
+    address: 0x55
+    reset_pin: GPIO48
+    display: lcd
+
+# ------------------------------------------------------------------- assets
+font:
+  - file: fonts/BlexMonoNerdFontMono-Regular.ttf
+    id: f09
+    size: 9
+    bpp: 4
+    glyphs: &glyphs " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~°±·"
+  - file: fonts/BlexMonoNerdFontMono-Regular.ttf
+    id: f10
+    size: 10
+    bpp: 4
+    glyphs: *glyphs
+  - file: fonts/BlexMonoNerdFontMono-Regular.ttf
+    id: f11
+    size: 11
+    bpp: 4
+    glyphs: *glyphs
+  - file: fonts/BlexMonoNerdFontMono-Regular.ttf
+    id: f12
+    size: 12
+    bpp: 4
+    glyphs: *glyphs
+  - file: fonts/BlexMonoNerdFontMono-Regular.ttf
+    id: f14
+    size: 14
+    bpp: 4
+    glyphs: *glyphs
+  - file: fonts/BlexMonoNerdFontMono-Regular.ttf
+    id: f18
+    size: 18
+    bpp: 4
+    glyphs: *glyphs
+  - file: fonts/BlexMonoNerdFontMono-Bold.ttf
+    id: f10b
+    size: 10
+    bpp: 4
+    glyphs: *glyphs
+
+image: !include assets/images.yaml
+
+mapping:
+  - id: compass_map
+    from: int
+    to: image
+    entries:
+      0: compass_arc_00
+      1: compass_arc_01
+      2: compass_arc_02
+      3: compass_arc_03
+      4: compass_arc_04
+      5: compass_arc_05
+      6: compass_arc_06
+      7: compass_arc_07
+      8: compass_arc_08
+      9: compass_arc_09
+      10: compass_arc_10
+      11: compass_arc_11
+      12: compass_arc_12
+      13: compass_arc_13
+      14: compass_arc_14
+      15: compass_arc_15
+      16: compass_arc_16
+      17: compass_arc_17
+      18: compass_arc_18
+      19: compass_arc_19
+      20: compass_arc_20
+      21: compass_arc_21
+      22: compass_arc_22
+      23: compass_arc_23
+      24: compass_arc_24
+      25: compass_arc_25
+      26: compass_arc_26
+      27: compass_arc_27
+      28: compass_arc_28
+      29: compass_arc_29
+      30: compass_arc_30
+      31: compass_arc_31
+      32: compass_arc_32
+      33: compass_arc_33
+      34: compass_arc_34
+      35: compass_arc_35
+
+# -------------------------------------------------------------------- state
+globals:
+  - id: g_page
+    type: int
+    initial_value: "0"
+  - id: g_lat
+    type: float
+    initial_value: "38.5733"
+  - id: g_lon
+    type: float
+    initial_value: "-109.5498"
+  - id: g_alt
+    type: float
+    initial_value: "4020"
+  - id: g_speed
+    type: float
+    initial_value: "62"
+  - id: g_heading
+    type: float
+    initial_value: "311"
+  - id: g_sats
+    type: int
+    initial_value: "9"
+  - id: g_hdop
+    type: float
+    initial_value: "0.8"
+  - id: g_temp
+    type: float
+    initial_value: "196"
+  - id: g_oil
+    type: float
+    initial_value: "42"
+  - id: g_volt
+    type: float
+    initial_value: "13.8"
+  - id: g_fuel
+    type: float
+    initial_value: "68"
+  - id: g_rpm
+    type: float
+    initial_value: "2140"
+  - id: g_pitch
+    type: float
+    initial_value: "1.8"
+  - id: g_yaw
+    type: float
+    initial_value: "1.2"
+  - id: g_roll
+    type: float
+    initial_value: "0.8"
+  - id: g_vac
+    type: float
+    initial_value: "18.4"
+  - id: g_tps
+    type: float
+    initial_value: "0.82"
+  - id: g_o2
+    type: float
+    initial_value: "0.45"
+  - id: g_iac
+    type: float
+    initial_value: "32"
+  - id: g_timing
+    type: float
+    initial_value: "13.5"
+  - id: g_serial_old
+    type: std::string
+    initial_value: '"BOOT OK\nHEAP142K\nPSRAM 8M\nGPS 3D\nTEMP196F\nALT 4020\n"'
+  - id: g_serial_mid
+    type: std::string
+    initial_value: '"IMU100HZ\nI2C 0x55\nTOUCH OK\nWIFI-67\nHDOP 0.8\nSATS 09\n"'
+  - id: g_serial_new
+    type: std::string
+    initial_value: '"MESH RX\nUART115K\nNVS OK\nRENIX OK\nFUEL 68%\nOIL 42P\n"'
+  - id: g_serial_idx
+    type: int
+    initial_value: "0"
+  - id: g_mesh_log
+    type: std::string
+    initial_value: '"[M01] K7ABC: ridge road clear\n[M02] N0CALL: camp is up\n[M03] W1XYZ: 2 hops, strong\n[M04] K7ABC: fuel at 68%\n[M05] N0CALL: copy that\n[M06] W1XYZ: moving to 191\n"'
+  - id: g_mesh_idx
+    type: int
+    initial_value: "0"
+  - id: g_mesh_packets
+    type: int
+    initial_value: "12844"
+  - id: g_mesh_rssi
+    type: int
+    initial_value: "-67"
+  - id: g_mesh_snr
+    type: float
+    initial_value: "8.2"
+  - id: g_mesh_hops
+    type: int
+    initial_value: "2"
+  - id: g_mesh_nodes
+    type: int
+    initial_value: "14"
+  - id: g_mesh_last_us
+    type: uint64_t
+    initial_value: "0"
+  - id: g_speed_base
+    type: int
+    initial_value: "-1"
+  - id: g_alt_base
+    type: int
+    initial_value: "-1"
+  - id: g_arc_idx
+    type: int
+    initial_value: "-1"
+
+sensor:
+  - platform: wifi_signal
+    id: wifi_rssi
+    update_interval: 30s
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      id: wifi_ip
+    ssid:
+      id: wifi_ssid
+
+# ----------------------------------------------------------------------- UI
+lvgl:
+  displays: [lcd]
+  touchscreens: [touch]
+  rotation: 270
+  buffer_size: 25%
+  draw_rounding: 4
+  refresh_interval: 33ms
+  log_level: WARN
+  bg_color: 0x060300
+  pages:
+    - id: main_page
+      widgets:
+        - image:
+            src: ui_bg
+            x: 0
+            y: 0
+
+        # ------------------------------------------------------ header
+        - obj:
+            x: 0
+            y: 0
+            width: 480
+            height: 30
+            bg_color: 0x0A0600
+            bg_opa: COVER
+            border_width: 0
+            radius: 0
+            pad_all: 0
+        - label:
+            x: 10
+            y: 3
+            text_font: f18
+            text_color: 0xFF8C00
+            text: "COMANCHE"
+        - line:
+            x: 96
+            y: 7
+            points:
+              - 0, 0
+              - 0, 16
+            line_color: 0x4A2A00
+            line_width: 1
+        - label:
+            id: screen_title
+            x: 104
+            y: 9
+            text_font: f11
+            text_color: 0x9A5400
+            text: "// NAV // FLIGHT"
+        - line:
+            x: 378
+            y: 7
+            points:
+              - 0, 0
+              - 0, 16
+            line_color: 0x4A2A00
+            line_width: 1
+        - label:
+            id: hdr_mission
+            x: 386
+            y: 9
+            text_font: f11
+            text_color: 0xD07400
+            text: "T+ 00:00:00"
+        - line:
+            x: 0
+            y: 30
+            points:
+              - 0, 0
+              - 480, 0
+            line_color: 0x9A5400
+            line_width: 1
+
+        # ------------------------------------------------------ NAV
+        - obj:
+            id: cont_nav
+            x: 0
+            y: 0
+            width: 480
+            height: 320
+            bg_opa: TRANSP
+            border_width: 0
+            radius: 0
+            pad_all: 0
+            clickable: false
+            widgets:
+              # speed tape, right of the serial strip
+              - obj:
+                  x: 72
+                  y: 34
+                  width: 56
+                  height: 250
+                  bg_color: 0x060300
+                  bg_opa: COVER
+                  border_width: 1
+                  border_color: 0x4A2A00
+                  radius: 0
+                  pad_all: 0
+                  scrollable: false
+                  clickable: false
+                  widgets:
+                    - label:
+                        id: speed_tape
+                        x: 0
+                        y: 29
+                        width: 28
+                        height: 210
+                        text_font: f10
+                        text_color: 0xD07400
+                        text_align: RIGHT
+                        text_line_space: 17
+                        text: "120\n100\n80\n60\n40\n20\n0"
+                    - obj: {id: spd_tick0, x: 28, y: 35, width: 10, height: 1, bg_color: 0xD07400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: spd_tick1, x: 28, y: 65, width: 10, height: 1, bg_color: 0xD07400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: spd_tick2, x: 28, y: 95, width: 10, height: 1, bg_color: 0xD07400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: spd_tick3, x: 28, y: 125, width: 10, height: 1, bg_color: 0xD07400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: spd_tick4, x: 28, y: 155, width: 10, height: 1, bg_color: 0xD07400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: spd_tick5, x: 28, y: 185, width: 10, height: 1, bg_color: 0xD07400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: spd_tick6, x: 28, y: 215, width: 10, height: 1, bg_color: 0xD07400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: spd_min0, x: 33, y: 50, width: 5, height: 1, bg_color: 0x9A5400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: spd_min1, x: 33, y: 80, width: 5, height: 1, bg_color: 0x9A5400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: spd_min2, x: 33, y: 110, width: 5, height: 1, bg_color: 0x9A5400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: spd_min3, x: 33, y: 140, width: 5, height: 1, bg_color: 0x9A5400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: spd_min4, x: 33, y: 170, width: 5, height: 1, bg_color: 0x9A5400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: spd_min5, x: 33, y: 200, width: 5, height: 1, bg_color: 0x9A5400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj:
+                        x: 0
+                        y: 0
+                        width: 56
+                        height: 42
+                        bg_color: 0x060300
+                        bg_opa: COVER
+                        border_width: 0
+                        radius: 0
+                        pad_all: 0
+                    - label: {x: 6, y: 4, text_font: f09, text_color: 0x9A5400, text: "MPH"}
+                    - label: {id: speed_digital, x: 6, y: 15, text_font: f18, text_color: 0xFF8C00, text: "062"}
+                    - line:
+                        x: 0
+                        y: 0
+                        points:
+                          - 38, 125
+                          - 56, 125
+                        line_color: 0xFF8C00
+                        line_width: 2
+                    - line:
+                        x: 0
+                        y: 0
+                        points:
+                          - 43, 121
+                          - 38, 125
+                          - 43, 129
+                        line_color: 0xFF8C00
+                        line_width: 2
+
+              # annunciators, top row: SPD / TMP / TLT / MIS
+              - button:
+                  id: ind_speed
+                  x: 136
+                  state: {checked: false}
+                  y: 34
+                  width: 62
+                  height: 28
+                  radius: 0
+                  bg_color: 0x0A0600
+                  bg_grad_dir: NONE
+                  bg_opa: COVER
+                  border_width: 1
+                  border_color: 0x9A5400
+                  outline_width: 0
+                  shadow_width: 0
+                  text_font: f10b
+                  text_color: 0xD07400
+                  checkable: true
+                  clickable: false
+                  checked:
+                    bg_color: 0xFF8C00
+                    bg_grad_dir: NONE
+                    border_color: 0xFF8C00
+                    text_color: 0x0A0600
+                  widgets:
+                    - label: {align: CENTER, text: "SPD"}
+              - button:
+                  id: ind_temp
+                  x: 206
+                  state: {checked: false}
+                  y: 34
+                  width: 62
+                  height: 28
+                  radius: 0
+                  bg_color: 0x0A0600
+                  bg_grad_dir: NONE
+                  bg_opa: COVER
+                  border_width: 1
+                  border_color: 0x9A5400
+                  outline_width: 0
+                  shadow_width: 0
+                  text_font: f10b
+                  text_color: 0xD07400
+                  checkable: true
+                  clickable: false
+                  checked:
+                    bg_color: 0xFF8C00
+                    bg_grad_dir: NONE
+                    border_color: 0xFF8C00
+                    text_color: 0x0A0600
+                  widgets:
+                    - label: {align: CENTER, text: "TMP"}
+              - button:
+                  id: ind_tilt
+                  x: 276
+                  state: {checked: false}
+                  y: 34
+                  width: 62
+                  height: 28
+                  radius: 0
+                  bg_color: 0x0A0600
+                  bg_grad_dir: NONE
+                  bg_opa: COVER
+                  border_width: 1
+                  border_color: 0x9A5400
+                  outline_width: 0
+                  shadow_width: 0
+                  text_font: f10b
+                  text_color: 0xD07400
+                  checkable: true
+                  clickable: false
+                  checked:
+                    bg_color: 0xFF8C00
+                    bg_grad_dir: NONE
+                    border_color: 0xFF8C00
+                    text_color: 0x0A0600
+                  widgets:
+                    - label: {align: CENTER, text: "TLT"}
+              - button:
+                  id: ind_time
+                  x: 346
+                  state: {checked: true}
+                  y: 34
+                  width: 62
+                  height: 28
+                  radius: 0
+                  bg_color: 0x0A0600
+                  bg_grad_dir: NONE
+                  bg_opa: COVER
+                  border_width: 1
+                  border_color: 0x9A5400
+                  outline_width: 0
+                  shadow_width: 0
+                  text_font: f10b
+                  text_color: 0xD07400
+                  checkable: true
+                  clickable: false
+                  checked:
+                    bg_color: 0xFF8C00
+                    bg_grad_dir: NONE
+                    border_color: 0xFF8C00
+                    text_color: 0x0A0600
+                  widgets:
+                    - label: {align: CENTER, text: "MIS"}
+              # one-third compass arc: pre-rendered masks, fixed pointer
+              - obj:
+                  x: 136
+                  y: 64
+                  width: 272
+                  height: 124
+                  bg_opa: TRANSP
+                  border_width: 0
+                  radius: 0
+                  pad_all: 0
+                  scrollable: false
+                  clickable: false
+                  widgets:
+                    - image:
+                        id: compass_card_img
+                        src: compass_arc_00
+                        x: 0
+                        y: 0
+                        recolor: 0xFF8C00
+                        recolor_opa: COVER
+                    - line:
+                        x: 0
+                        y: 0
+                        points:
+                          - 130, 0
+                          - 136, 10
+                          - 142, 0
+                        line_color: 0xFF8C00
+                        line_width: 2
+                    - label:
+                        id: arc_heading
+                        x: 0
+                        y: 108
+                        width: 272
+                        text_align: CENTER
+                        text_font: f14
+                        text_color: 0xFF8C00
+                        text: "311° NW"
+
+              # altitude tape, right edge
+              - obj:
+                  x: 416
+                  y: 34
+                  width: 56
+                  height: 250
+                  bg_color: 0x060300
+                  bg_opa: COVER
+                  border_width: 1
+                  border_color: 0x4A2A00
+                  radius: 0
+                  pad_all: 0
+                  scrollable: false
+                  clickable: false
+                  widgets:
+                    - label: {x: 6, y: 4, text_font: f09, text_color: 0x9A5400, text: "FT"}
+                    - label: {id: alt_digital, x: 6, y: 16, text_font: f10, text_color: 0xFF8C00, text: "4,020"}
+                    - label:
+                        id: alt_tape
+                        x: 28
+                        y: 29
+                        width: 26
+                        height: 210
+                        text_font: f10
+                        text_color: 0xD07400
+                        text_align: LEFT
+                        text_line_space: 17
+                        text: "4300\n4200\n4100\n4000\n3900\n3800\n3700"
+                    - obj: {id: alt_tick0, x: 16, y: 35, width: 10, height: 1, bg_color: 0xD07400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: alt_tick1, x: 16, y: 65, width: 10, height: 1, bg_color: 0xD07400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: alt_tick2, x: 16, y: 95, width: 10, height: 1, bg_color: 0xD07400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: alt_tick3, x: 16, y: 125, width: 10, height: 1, bg_color: 0xD07400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: alt_tick4, x: 16, y: 155, width: 10, height: 1, bg_color: 0xD07400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: alt_tick5, x: 16, y: 185, width: 10, height: 1, bg_color: 0xD07400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: alt_tick6, x: 16, y: 215, width: 10, height: 1, bg_color: 0xD07400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: alt_min0, x: 21, y: 50, width: 5, height: 1, bg_color: 0x9A5400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: alt_min1, x: 21, y: 80, width: 5, height: 1, bg_color: 0x9A5400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: alt_min2, x: 21, y: 110, width: 5, height: 1, bg_color: 0x9A5400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: alt_min3, x: 21, y: 140, width: 5, height: 1, bg_color: 0x9A5400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: alt_min4, x: 21, y: 170, width: 5, height: 1, bg_color: 0x9A5400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - obj: {id: alt_min5, x: 21, y: 200, width: 5, height: 1, bg_color: 0x9A5400, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0}
+                    - line:
+                        x: 0
+                        y: 0
+                        points:
+                          - 0, 125
+                          - 16, 125
+                        line_color: 0xFF8C00
+                        line_width: 2
+                    - line:
+                        x: 0
+                        y: 0
+                        points:
+                          - 11, 121
+                          - 16, 125
+                          - 11, 129
+                        line_color: 0xFF8C00
+                        line_width: 2
+
+              # roll gauge: front view on a 120-degree tick face
+              - obj:
+                  x: 136
+                  y: 196
+                  width: 134
+                  height: 88
+                  bg_opa: TRANSP
+                  border_width: 0
+                  radius: 0
+                  pad_all: 0
+                  scrollable: false
+                  clickable: false
+                  widgets:
+                    - image:
+                        src: gauge_roll_face
+                        x: 0
+                        y: 0
+                        recolor: 0xFF8C00
+                        recolor_opa: COVER
+                    - image:
+                        id: gauge_roll_truck
+                        src: truck_front
+                        x: 39
+                        y: 38
+                        pivot_x: 28
+                        pivot_y: 24
+                        rotation: 0
+                        antialias: true
+                        recolor: 0xFF8C00
+                        recolor_opa: COVER
+                    - label:
+                        id: gauge_roll_title
+                        x: 0
+                        y: 2
+                        width: 134
+                        text_align: CENTER
+                        text_font: f09
+                        text_color: 0xD07400
+                        text: "ROLL +0.8°"
+              - obj:
+                  x: 274
+                  y: 196
+                  width: 134
+                  height: 88
+                  bg_opa: TRANSP
+                  border_width: 0
+                  radius: 0
+                  pad_all: 0
+                  scrollable: false
+                  clickable: false
+                  widgets:
+                    - image:
+                        src: gauge_pitch_face
+                        x: 0
+                        y: 0
+                        recolor: 0xFF8C00
+                        recolor_opa: COVER
+                    - image:
+                        id: gauge_pitch_truck
+                        src: truck_side
+                        x: 9
+                        y: 42
+                        pivot_x: 58
+                        pivot_y: 20
+                        rotation: 0
+                        antialias: true
+                        recolor: 0xFF8C00
+                        recolor_opa: COVER
+                    - label:
+                        id: gauge_pitch_title
+                        x: 0
+                        y: 2
+                        width: 134
+                        text_align: CENTER
+                        text_font: f09
+                        text_color: 0xD07400
+                        text: "PITCH +1.8°"
+
+        # ------------------------------------------------------ DIAG
+        - obj:
+            id: cont_diag
+            x: 0
+            y: 0
+            width: 480
+            height: 320
+            bg_opa: TRANSP
+            border_width: 0
+            radius: 0
+            pad_all: 0
+            clickable: false
+            hidden: true
+            widgets:
+              - obj:
+                  bg_opa: TRANSP
+                  border_width: 1
+                  border_color: 0x4A2A00
+                  radius: 0
+                  pad_all: 0
+                  scrollable: false
+                  clickable: false
+                  x: 72
+                  y: 34
+                  width: 168
+                  height: 156
+              - label: {x: 78, y: 38, text_font: f09, text_color: 0x9A5400, text: "RENIX // ECU"}
+              - line:
+                  x: 78
+                  y: 52
+                  points:
+                    - 0, 0
+                    - 156, 0
+                  line_color: 0x4A2A00
+                  line_width: 1
+              - label: {x: 78, y: 58, text_font: f09, text_color: 0x9A5400, text: "COOLANT"}
+              - label: {id: diag_cool, x: 142, y: 57, text_font: f10, text_color: 0xFF8C00, text: "196 F"}
+              - label: {x: 206, y: 58, text_font: f09, text_color: 0xD07400, text: "OK"}
+              - label: {x: 78, y: 80, text_font: f09, text_color: 0x9A5400, text: "VACUUM"}
+              - label: {id: diag_vac, x: 142, y: 79, text_font: f10, text_color: 0xFF8C00, text: "18.4 IN"}
+              - label: {x: 206, y: 80, text_font: f09, text_color: 0xD07400, text: "OK"}
+              - label: {x: 78, y: 102, text_font: f09, text_color: 0x9A5400, text: "TPS"}
+              - label: {id: diag_tps, x: 142, y: 101, text_font: f10, text_color: 0xFF8C00, text: "0.82 V"}
+              - label: {x: 206, y: 102, text_font: f09, text_color: 0xD07400, text: "IDLE"}
+              - label: {x: 78, y: 124, text_font: f09, text_color: 0x9A5400, text: "O2"}
+              - label: {id: diag_o2, x: 142, y: 123, text_font: f10, text_color: 0xFF8C00, text: "0.45 V"}
+              - label: {x: 206, y: 124, text_font: f09, text_color: 0xD07400, text: "OSC"}
+              - label: {x: 78, y: 146, text_font: f09, text_color: 0x9A5400, text: "IAC"}
+              - label: {id: diag_iac, x: 142, y: 145, text_font: f10, text_color: 0xFF8C00, text: "32"}
+              - label: {x: 206, y: 146, text_font: f09, text_color: 0xD07400, text: "STP"}
+              - label: {x: 78, y: 168, text_font: f09, text_color: 0x9A5400, text: "TIMING"}
+              - label: {id: diag_timing, x: 142, y: 167, text_font: f10, text_color: 0xFF8C00, text: "13.5°"}
+              - label: {x: 206, y: 168, text_font: f09, text_color: 0xD07400, text: "BTDC"}
+
+              - obj:
+                  bg_opa: TRANSP
+                  border_width: 1
+                  border_color: 0x4A2A00
+                  radius: 0
+                  pad_all: 0
+                  scrollable: false
+                  clickable: false
+                  x: 246
+                  y: 34
+                  width: 226
+                  height: 156
+              - label: {x: 252, y: 38, text_font: f09, text_color: 0x9A5400, text: "ENGINE HEALTH"}
+              - line:
+                  x: 252
+                  y: 52
+                  points:
+                    - 0, 0
+                    - 214, 0
+                  line_color: 0x4A2A00
+                  line_width: 1
+              - label: {x: 252, y: 58, text_font: f09, text_color: 0x9A5400, text: "ENG"}
+              - label: {id: eng_val, x: 304, y: 57, text_font: f10, text_color: 0xFF8C00, text: "196°F"}
+              - bar:
+                  id: eng_bar
+                  x: 362
+                  y: 61
+                  width: 86
+                  height: 7
+                  min_value: 0
+                  max_value: 100
+                  value: 54
+                  bg_color: 0x2A1800
+                  bg_opa: COVER
+                  border_width: 1
+                  border_color: 0x4A2A00
+                  radius: 0
+                  pad_all: 0
+                  indicator:
+                    bg_color: 0xFF8C00
+                    bg_opa: COVER
+                    radius: 0
+              - label: {id: eng_status, x: 452, y: 58, text_font: f09, text_color: 0xD07400, text: "OK"}
+              - label: {x: 252, y: 80, text_font: f09, text_color: 0x9A5400, text: "OIL"}
+              - label: {id: oil_val, x: 304, y: 79, text_font: f10, text_color: 0xFF8C00, text: "42 PSI"}
+              - bar:
+                  id: oil_bar
+                  x: 362
+                  y: 83
+                  width: 86
+                  height: 7
+                  min_value: 0
+                  max_value: 100
+                  value: 52
+                  bg_color: 0x2A1800
+                  bg_opa: COVER
+                  border_width: 1
+                  border_color: 0x4A2A00
+                  radius: 0
+                  pad_all: 0
+                  indicator:
+                    bg_color: 0xFF8C00
+                    bg_opa: COVER
+                    radius: 0
+              - label: {id: oil_status, x: 452, y: 80, text_font: f09, text_color: 0xD07400, text: "OK"}
+              - label: {x: 252, y: 102, text_font: f09, text_color: 0x9A5400, text: "BAT"}
+              - label: {id: bat_val, x: 304, y: 101, text_font: f10, text_color: 0xFF8C00, text: "13.8 V"}
+              - bar:
+                  id: bat_bar
+                  x: 362
+                  y: 105
+                  width: 86
+                  height: 7
+                  min_value: 0
+                  max_value: 100
+                  value: 63
+                  bg_color: 0x2A1800
+                  bg_opa: COVER
+                  border_width: 1
+                  border_color: 0x4A2A00
+                  radius: 0
+                  pad_all: 0
+                  indicator:
+                    bg_color: 0xFF8C00
+                    bg_opa: COVER
+                    radius: 0
+              - label: {id: bat_status, x: 452, y: 102, text_font: f09, text_color: 0xD07400, text: "CHG"}
+              - label: {x: 252, y: 124, text_font: f09, text_color: 0x9A5400, text: "FUEL"}
+              - label: {id: fuel_val, x: 304, y: 123, text_font: f10, text_color: 0xFF8C00, text: "68%"}
+              - bar:
+                  id: fuel_bar
+                  x: 362
+                  y: 127
+                  width: 86
+                  height: 7
+                  min_value: 0
+                  max_value: 100
+                  value: 68
+                  bg_color: 0x2A1800
+                  bg_opa: COVER
+                  border_width: 1
+                  border_color: 0x4A2A00
+                  radius: 0
+                  pad_all: 0
+                  indicator:
+                    bg_color: 0xFF8C00
+                    bg_opa: COVER
+                    radius: 0
+              - label: {id: fuel_status, x: 452, y: 124, text_font: f09, text_color: 0xD07400, text: "312"}
+              - label: {x: 252, y: 146, text_font: f09, text_color: 0x9A5400, text: "RPM"}
+              - label: {id: rpm_val, x: 304, y: 145, text_font: f10, text_color: 0xFF8C00, text: "2140"}
+              - bar:
+                  id: rpm_bar
+                  x: 362
+                  y: 149
+                  width: 86
+                  height: 7
+                  min_value: 0
+                  max_value: 100
+                  value: 36
+                  bg_color: 0x2A1800
+                  bg_opa: COVER
+                  border_width: 1
+                  border_color: 0x4A2A00
+                  radius: 0
+                  pad_all: 0
+                  indicator:
+                    bg_color: 0xFF8C00
+                    bg_opa: COVER
+                    radius: 0
+              - label: {id: rpm_status, x: 452, y: 146, text_font: f09, text_color: 0xD07400, text: "4X4"}
+              - line:
+                  x: 252
+                  y: 164
+                  points:
+                    - 0, 0
+                    - 214, 0
+                  line_color: 0x4A2A00
+                  line_width: 1
+              - label: {x: 252, y: 170, text_font: f09, text_color: 0x9A5400, text: "RENIX // CLOSED LOOP"}
+              - label: {x: 452, y: 170, text_font: f09, text_color: 0xD07400, text: "4.0L"}
+
+              # hero turntable band
+              - obj:
+                  bg_opa: TRANSP
+                  border_width: 1
+                  border_color: 0x4A2A00
+                  radius: 0
+                  pad_all: 0
+                  scrollable: false
+                  clickable: false
+                  x: 72
+                  y: 196
+                  width: 394
+                  height: 88
+              - label: {x: 78, y: 200, text_font: f09, text_color: 0x9A5400, text: "MJ // TURNTABLE"}
+              - line:
+                  x: 190
+                  y: 204
+                  points:
+                    - 0, 0
+                    - 0, 72
+                  line_color: 0x4A2A00
+                  line_width: 1
+              - line:
+                  x: 348
+                  y: 204
+                  points:
+                    - 0, 0
+                    - 0, 72
+                  line_color: 0x4A2A00
+                  line_width: 1
+              - label: {x: 78, y: 216, text_font: f09, text_color: 0x9A5400, text: "ATTITUDE"}
+              - label: {x: 78, y: 230, text_font: f09, text_color: 0x9A5400, text: "PITCH"}
+              - label: {id: hero_pitch, x: 138, y: 229, text_font: f10, text_color: 0xFF8C00, text: "+1.8°"}
+              - label: {x: 78, y: 244, text_font: f09, text_color: 0x9A5400, text: "ROLL"}
+              - label: {id: hero_roll, x: 138, y: 243, text_font: f10, text_color: 0xFF8C00, text: "+0.8°"}
+              - label: {x: 78, y: 258, text_font: f09, text_color: 0x9A5400, text: "YAW"}
+              - label: {id: hero_yaw, x: 138, y: 257, text_font: f12, text_color: 0xFF8C00, text: "311°"}
+              - label: {x: 78, y: 272, text_font: f09, text_color: 0xD07400, text: "RENIX // 4WD"}
+              - label: {x: 354, y: 216, text_font: f09, text_color: 0x9A5400, text: "TURNTABLE"}
+              - label: {x: 354, y: 229, text_font: f10, text_color: 0xFF8C00, text: "5.00 S/REV"}
+              - label: {x: 354, y: 243, text_font: f09, text_color: 0xD07400, text: "3.0 DEG/FRM"}
+              - label: {x: 354, y: 257, text_font: f10, text_color: 0xD07400, text: "1986 // MJ"}
+              - label: {x: 354, y: 272, text_font: f09, text_color: 0x9A5400, text: "BED 7FT"}
+
+        # ------------------------------------------------------ COMMS
+        - obj:
+            id: cont_comms
+            x: 0
+            y: 0
+            width: 480
+            height: 320
+            bg_opa: TRANSP
+            border_width: 0
+            radius: 0
+            pad_all: 0
+            clickable: false
+            hidden: true
+            widgets:
+              - obj:
+                  bg_opa: TRANSP
+                  border_width: 1
+                  border_color: 0x4A2A00
+                  radius: 0
+                  pad_all: 0
+                  scrollable: false
+                  clickable: false
+                  x: 8
+                  y: 34
+                  width: 150
+                  height: 250
+              - label: {x: 14, y: 38, text_font: f09, text_color: 0x9A5400, text: "MESH // AUTO"}
+              - line:
+                  x: 14
+                  y: 52
+                  points:
+                    - 0, 0
+                    - 134, 0
+                  line_color: 0x4A2A00
+                  line_width: 1
+              - label: {id: mesh_proto, x: 14, y: 58, text_font: f12, text_color: 0xFF8C00, text: "MESHTASTIC"}
+              - label: {id: mesh_node, x: 14, y: 74, text_font: f09, text_color: 0xD07400, text: "NODE !A1B2C3"}
+              - label: {x: 14, y: 94, text_font: f09, text_color: 0x9A5400, text: "RSSI"}
+              - label: {id: mesh_rssi, x: 62, y: 93, text_font: f10, text_color: 0xFF8C00, text: "-67 dBm"}
+              - label: {x: 14, y: 112, text_font: f09, text_color: 0x9A5400, text: "SNR"}
+              - label: {id: mesh_snr, x: 62, y: 111, text_font: f10, text_color: 0xFF8C00, text: "8.2 dB"}
+              - label: {x: 14, y: 130, text_font: f09, text_color: 0x9A5400, text: "HOPS"}
+              - label: {id: mesh_hops, x: 62, y: 129, text_font: f10, text_color: 0xFF8C00, text: "2"}
+              - label: {x: 14, y: 148, text_font: f09, text_color: 0x9A5400, text: "NODES"}
+              - label: {id: mesh_nodes, x: 62, y: 147, text_font: f10, text_color: 0xFF8C00, text: "14"}
+              - label: {x: 14, y: 166, text_font: f09, text_color: 0x9A5400, text: "PACKETS"}
+              - label: {id: mesh_packets, x: 62, y: 165, text_font: f10, text_color: 0xFF8C00, text: "12,844"}
+              - label: {x: 14, y: 184, text_font: f09, text_color: 0x9A5400, text: "LAST"}
+              - label: {id: mesh_last, x: 62, y: 183, text_font: f10, text_color: 0xFF8C00, text: "00:02"}
+              - line:
+                  x: 14
+                  y: 198
+                  points:
+                    - 0, 0
+                    - 134, 0
+                  line_color: 0x4A2A00
+                  line_width: 1
+              - label: {x: 14, y: 204, text_font: f09, text_color: 0x9A5400, text: "UART1"}
+              - label: {x: 14, y: 216, text_font: f10, text_color: 0xD07400, text: "115200 8N1"}
+              - label: {x: 14, y: 234, text_font: f09, text_color: 0x9A5400, text: "AUTO-DETECT"}
+              - label: {x: 14, y: 246, text_font: f10, text_color: 0xFF8C00, text: "MESHTASTIC"}
+              - label: {x: 14, y: 260, text_font: f09, text_color: 0x9A5400, text: "MESHCORE"}
+
+              - obj:
+                  bg_opa: TRANSP
+                  border_width: 1
+                  border_color: 0x4A2A00
+                  radius: 0
+                  pad_all: 0
+                  scrollable: false
+                  clickable: false
+                  x: 166
+                  y: 34
+                  width: 306
+                  height: 250
+              - label: {x: 172, y: 38, text_font: f09, text_color: 0x9A5400, text: "MESH // MESSAGES"}
+              - label: {id: comms_rate, x: 390, y: 38, text_font: f09, text_color: 0xD07400, text: "12.4 KB/S"}
+              - line:
+                  x: 172
+                  y: 52
+                  points:
+                    - 0, 0
+                    - 294, 0
+                  line_color: 0x4A2A00
+                  line_width: 1
+              - label:
+                  id: mesh_log
+                  x: 172
+                  y: 58
+                  width: 294
+                  height: 202
+                  text_font: f10
+                  text_color: 0xFF8C00
+                  text_line_space: 6
+                  text: "[M01] K7ABC: ridge road clear\n[M02] N0CALL: camp is up\n[M03] W1XYZ: 2 hops, strong\n[M04] K7ABC: fuel at 68%\n[M05] N0CALL: copy that\n[M06] W1XYZ: moving to 191\n"
+              - label: {id: comms_footer, x: 172, y: 268, text_font: f09, text_color: 0x9A5400, text: "UART1 // 115200 8N1 // 0 ERR"}
+
+        # ------------------------------------------------------ SYS
+        - obj:
+            id: cont_sys
+            x: 0
+            y: 0
+            width: 480
+            height: 320
+            bg_opa: TRANSP
+            border_width: 0
+            radius: 0
+            pad_all: 0
+            clickable: false
+            hidden: true
+            widgets:
+              - obj:
+                  bg_opa: TRANSP
+                  border_width: 1
+                  border_color: 0x4A2A00
+                  radius: 0
+                  pad_all: 0
+                  scrollable: false
+                  clickable: false
+                  x: 8
+                  y: 34
+                  width: 224
+                  height: 250
+              - label: {x: 14, y: 38, text_font: f09, text_color: 0x9A5400, text: "MAINBOARD // SYS"}
+              - line:
+                  x: 14
+                  y: 52
+                  points:
+                    - 0, 0
+                    - 208, 0
+                  line_color: 0x4A2A00
+                  line_width: 1
+              - label: {x: 14, y: 58, text_font: f09, text_color: 0x9A5400, text: "CHIP"}
+              - label: {x: 96, y: 57, text_font: f10, text_color: 0xFF8C00, text: "ESP32-S3 rev0.2"}
+              - label: {x: 14, y: 78, text_font: f09, text_color: 0x9A5400, text: "CORES"}
+              - label: {x: 96, y: 77, text_font: f10, text_color: 0xFF8C00, text: "2 @ 240 MHz"}
+              - label: {x: 14, y: 98, text_font: f09, text_color: 0x9A5400, text: "PSRAM"}
+              - label: {x: 96, y: 97, text_font: f10, text_color: 0xFF8C00, text: "8.0 MB"}
+              - label: {x: 14, y: 118, text_font: f09, text_color: 0x9A5400, text: "FLASH"}
+              - label: {x: 96, y: 117, text_font: f10, text_color: 0xFF8C00, text: "16 MB"}
+              - label: {x: 14, y: 138, text_font: f09, text_color: 0x9A5400, text: "HEAP"}
+              - label: {id: sys_heap, x: 96, y: 137, text_font: f10, text_color: 0xFF8C00, text: "142 KB"}
+              - label: {x: 14, y: 158, text_font: f09, text_color: 0x9A5400, text: "PSRAM FREE"}
+              - label: {id: sys_psram, x: 96, y: 157, text_font: f10, text_color: 0xFF8C00, text: "7.8 MB"}
+              - label: {x: 14, y: 178, text_font: f09, text_color: 0x9A5400, text: "UPTIME"}
+              - label: {id: sys_uptime, x: 96, y: 177, text_font: f10, text_color: 0xFF8C00, text: "00:00:00"}
+              - label: {x: 14, y: 198, text_font: f09, text_color: 0x9A5400, text: "WIFI"}
+              - label: {id: sys_rssi, x: 96, y: 197, text_font: f10, text_color: 0xFF8C00, text: "-67 dBm"}
+              - label: {x: 14, y: 218, text_font: f09, text_color: 0x9A5400, text: "IP"}
+              - label: {id: sys_ip, x: 96, y: 217, text_font: f10, text_color: 0xFF8C00, text: "192.168.1.42"}
+              - label: {x: 14, y: 238, text_font: f09, text_color: 0x9A5400, text: "FIRMWARE"}
+              - label: {x: 96, y: 237, text_font: f10, text_color: 0xFF8C00, text: "${fw_version}"}
+              - line:
+                  x: 14
+                  y: 258
+                  points:
+                    - 0, 0
+                    - 208, 0
+                  line_color: 0x4A2A00
+                  line_width: 1
+              - label: {x: 14, y: 264, text_font: f09, text_color: 0xD07400, text: "ST77922 // ST7123 // 16MB"}
+
+              - obj:
+                  bg_opa: TRANSP
+                  border_width: 1
+                  border_color: 0x4A2A00
+                  radius: 0
+                  pad_all: 0
+                  scrollable: false
+                  clickable: false
+                  x: 240
+                  y: 34
+                  width: 232
+                  height: 250
+              - label: {x: 246, y: 38, text_font: f09, text_color: 0x9A5400, text: "SENSORS // IO"}
+              - line:
+                  x: 246
+                  y: 52
+                  points:
+                    - 0, 0
+                    - 216, 0
+                  line_color: 0x4A2A00
+                  line_width: 1
+              - label: {x: 246, y: 58, text_font: f09, text_color: 0x9A5400, text: "GPS"}
+              - label: {id: sens_gps, x: 330, y: 57, text_font: f10, text_color: 0xFF8C00, text: "3D FIX"}
+              - label: {x: 246, y: 75, text_font: f09, text_color: 0x9A5400, text: "SATS"}
+              - label: {id: sens_sats, x: 330, y: 74, text_font: f10, text_color: 0xFF8C00, text: "09"}
+              - label: {x: 246, y: 92, text_font: f09, text_color: 0x9A5400, text: "HDOP"}
+              - label: {id: sens_hdop, x: 330, y: 91, text_font: f10, text_color: 0xFF8C00, text: "0.8"}
+              - label: {x: 246, y: 109, text_font: f09, text_color: 0x9A5400, text: "PITCH"}
+              - label: {id: sens_pitch, x: 330, y: 108, text_font: f10, text_color: 0xFF8C00, text: "+1.8°"}
+              - label: {x: 246, y: 126, text_font: f09, text_color: 0x9A5400, text: "YAW"}
+              - label: {id: sens_yaw, x: 330, y: 125, text_font: f10, text_color: 0xFF8C00, text: "+1.2°"}
+              - label: {x: 246, y: 143, text_font: f09, text_color: 0x9A5400, text: "ROLL"}
+              - label: {id: sens_roll, x: 330, y: 142, text_font: f10, text_color: 0xFF8C00, text: "+0.8°"}
+              - label: {x: 246, y: 160, text_font: f09, text_color: 0x9A5400, text: "COOLANT"}
+              - label: {id: sens_cool, x: 330, y: 159, text_font: f10, text_color: 0xFF8C00, text: "196 F"}
+              - label: {x: 246, y: 177, text_font: f09, text_color: 0x9A5400, text: "OIL"}
+              - label: {id: sens_oil, x: 330, y: 176, text_font: f10, text_color: 0xFF8C00, text: "42 PSI"}
+              - label: {x: 246, y: 194, text_font: f09, text_color: 0x9A5400, text: "FUEL"}
+              - label: {id: sens_fuel, x: 330, y: 193, text_font: f10, text_color: 0xFF8C00, text: "68%"}
+              - label: {x: 246, y: 211, text_font: f09, text_color: 0x9A5400, text: "VOLTS"}
+              - label: {id: sens_volt, x: 330, y: 210, text_font: f10, text_color: 0xFF8C00, text: "13.8 V"}
+              - label: {x: 246, y: 228, text_font: f09, text_color: 0x9A5400, text: "MESH"}
+              - label: {id: sens_mesh, x: 330, y: 227, text_font: f10, text_color: 0xFF8C00, text: "RX 12.4 KB/S"}
+              - label: {x: 246, y: 245, text_font: f09, text_color: 0x9A5400, text: "I2C"}
+              - label: {x: 330, y: 244, text_font: f10, text_color: 0xFF8C00, text: "0x55 / 0x76"}
+              - line:
+                  x: 246
+                  y: 262
+                  points:
+                    - 0, 0
+                    - 216, 0
+                  line_color: 0x4A2A00
+                  line_width: 1
+              - label: {x: 246, y: 268, text_font: f09, text_color: 0xD07400, text: "I2C 400 KHZ // 2 DEVICES"}
+
+        # ------------------------------------------------------ truck
+        - animimg:
+            id: truck_anim
+            x: 199
+            y: 200
+            width: 140
+            height: 78
+            src: !include assets/truck_src.yaml
+            duration: 5s
+            repeat_count: forever
+            auto_start: false
+            hidden: true
+            recolor: 0xFF8C00
+            recolor_opa: COVER
+
+        # ------------------------------------------------------ serial
+        - obj:
+            id: serial_panel
+            x: 8
+            y: 34
+            width: 56
+            height: 250
+            bg_color: 0x060300
+            bg_opa: COVER
+            border_width: 1
+            border_color: 0x4A2A00
+            radius: 0
+            pad_all: 0
+        - label:
+            id: serial_title
+            x: 12
+            y: 36
+            text_font: f09
+            text_color: 0x9A5400
+            text: "SERIAL"
+        - label:
+            id: serial_new
+            x: 12
+            y: 50
+            width: 48
+            height: 66
+            text_font: f09
+            text_color: 0xFF8C00
+            text_line_space: -1
+            text: "MESH RX\nUART115K\nNVS OK\nRENIX OK\nFUEL 68%\nOIL 42P\n"
+        - line:
+            id: serial_rule1
+            x: 12
+            y: 117
+            points:
+              - 0, 0
+              - 40, 0
+            line_color: 0x4A2A00
+            line_width: 1
+        - label:
+            id: serial_mid
+            x: 12
+            y: 120
+            width: 48
+            height: 66
+            text_font: f09
+            text_color: 0xD07400
+            text_line_space: -1
+            text: "IMU100HZ\nI2C 0x55\nTOUCH OK\nWIFI-67\nHDOP 0.8\nSATS 09\n"
+        - line:
+            id: serial_rule2
+            x: 12
+            y: 187
+            points:
+              - 0, 0
+              - 40, 0
+            line_color: 0x4A2A00
+            line_width: 1
+        - label:
+            id: serial_old
+            x: 12
+            y: 190
+            width: 48
+            height: 66
+            text_font: f09
+            text_color: 0x9A5400
+            text_line_space: -1
+            text: "BOOT OK\nHEAP142K\nPSRAM 8M\nGPS 3D\nTEMP196F\nALT 4020\n"
+
+        # ------------------------------------------------------ buttons
+        - button:
+            id: btn_nav
+            y: 288
+            width: 120
+            height: 32
+            radius: 0
+            bg_color: 0x060300
+            bg_grad_dir: NONE
+            bg_opa: COVER
+            border_width: 0
+            outline_width: 0
+            shadow_width: 0
+            text_font: f12
+            text_color: 0xFF8C00
+            checkable: true
+            checked:
+              bg_color: 0xFF8C00
+              text_color: 0x0A0600
+            x: 0
+            state: {checked: true}
+            widgets:
+              - label: {align: CENTER, text: "NAV"}
+            on_click:
+              - lvgl.widget.show: {id: cont_nav}
+              - lvgl.widget.hide: {id: cont_diag}
+              - lvgl.widget.hide: {id: cont_comms}
+              - lvgl.widget.hide: {id: cont_sys}
+              - lvgl.widget.hide: {id: truck_anim}
+              - lvgl.widget.show: {id: serial_panel}
+              - lvgl.widget.show: {id: serial_title}
+              - lvgl.widget.show: {id: serial_old}
+              - lvgl.widget.show: {id: serial_mid}
+              - lvgl.widget.show: {id: serial_new}
+              - lvgl.widget.show: {id: serial_rule1}
+              - lvgl.widget.show: {id: serial_rule2}
+              - lambda: id(g_page) = 0;
+              - lvgl.animimg.stop: truck_anim
+              - lvgl.widget.update:
+                  id: [btn_nav, btn_diag, btn_comms, btn_sys]
+                  state: {checked: false}
+              - lvgl.widget.update: {id: btn_nav, state: {checked: true}}
+              - lvgl.label.update: {id: screen_title, text: "// NAV // FLIGHT"}
+
+        - button:
+            y: 288
+            width: 120
+            height: 32
+            radius: 0
+            bg_color: 0x060300
+            bg_grad_dir: NONE
+            bg_opa: COVER
+            border_width: 0
+            outline_width: 0
+            shadow_width: 0
+            text_font: f12
+            text_color: 0xFF8C00
+            checkable: true
+            checked:
+              bg_color: 0xFF8C00
+              text_color: 0x0A0600
+            id: btn_diag
+            x: 120
+            widgets:
+              - label: {align: CENTER, text: "DIAG"}
+            on_click:
+              - lvgl.widget.hide: {id: cont_nav}
+              - lvgl.widget.show: {id: cont_diag}
+              - lvgl.widget.hide: {id: cont_comms}
+              - lvgl.widget.hide: {id: cont_sys}
+              - lvgl.widget.show: {id: truck_anim}
+              - lvgl.widget.show: {id: serial_panel}
+              - lvgl.widget.show: {id: serial_title}
+              - lvgl.widget.show: {id: serial_old}
+              - lvgl.widget.show: {id: serial_mid}
+              - lvgl.widget.show: {id: serial_new}
+              - lvgl.widget.show: {id: serial_rule1}
+              - lvgl.widget.show: {id: serial_rule2}
+              - lambda: id(g_page) = 1;
+              - lvgl.animimg.start: truck_anim
+              - lvgl.widget.update:
+                  id: [btn_nav, btn_diag, btn_comms, btn_sys]
+                  state: {checked: false}
+              - lvgl.widget.update: {id: btn_diag, state: {checked: true}}
+              - lvgl.label.update: {id: screen_title, text: "// DIAG // RENIX"}
+
+        - button:
+            y: 288
+            width: 120
+            height: 32
+            radius: 0
+            bg_color: 0x060300
+            bg_grad_dir: NONE
+            bg_opa: COVER
+            border_width: 0
+            outline_width: 0
+            shadow_width: 0
+            text_font: f12
+            text_color: 0xFF8C00
+            checkable: true
+            checked:
+              bg_color: 0xFF8C00
+              text_color: 0x0A0600
+            id: btn_comms
+            x: 240
+            widgets:
+              - label: {align: CENTER, text: "COMMS"}
+            on_click:
+              - lvgl.widget.hide: {id: cont_nav}
+              - lvgl.widget.hide: {id: cont_diag}
+              - lvgl.widget.show: {id: cont_comms}
+              - lvgl.widget.hide: {id: cont_sys}
+              - lvgl.widget.hide: {id: truck_anim}
+              - lvgl.widget.hide: {id: serial_panel}
+              - lvgl.widget.hide: {id: serial_title}
+              - lvgl.widget.hide: {id: serial_old}
+              - lvgl.widget.hide: {id: serial_mid}
+              - lvgl.widget.hide: {id: serial_new}
+              - lvgl.widget.hide: {id: serial_rule1}
+              - lvgl.widget.hide: {id: serial_rule2}
+              - lambda: id(g_page) = 2;
+              - lvgl.animimg.stop: truck_anim
+              - lvgl.widget.update:
+                  id: [btn_nav, btn_diag, btn_comms, btn_sys]
+                  state: {checked: false}
+              - lvgl.widget.update: {id: btn_comms, state: {checked: true}}
+              - lvgl.label.update: {id: screen_title, text: "// COMMS // MESH"}
+
+        - button:
+            y: 288
+            width: 120
+            height: 32
+            radius: 0
+            bg_color: 0x060300
+            bg_grad_dir: NONE
+            bg_opa: COVER
+            border_width: 0
+            outline_width: 0
+            shadow_width: 0
+            text_font: f12
+            text_color: 0xFF8C00
+            checkable: true
+            checked:
+              bg_color: 0xFF8C00
+              text_color: 0x0A0600
+            id: btn_sys
+            x: 360
+            widgets:
+              - label: {align: CENTER, text: "SYS"}
+            on_click:
+              - lvgl.widget.hide: {id: cont_nav}
+              - lvgl.widget.hide: {id: cont_diag}
+              - lvgl.widget.hide: {id: cont_comms}
+              - lvgl.widget.show: {id: cont_sys}
+              - lvgl.widget.hide: {id: truck_anim}
+              - lvgl.widget.hide: {id: serial_panel}
+              - lvgl.widget.hide: {id: serial_title}
+              - lvgl.widget.hide: {id: serial_old}
+              - lvgl.widget.hide: {id: serial_mid}
+              - lvgl.widget.hide: {id: serial_new}
+              - lvgl.widget.hide: {id: serial_rule1}
+              - lvgl.widget.hide: {id: serial_rule2}
+              - lambda: id(g_page) = 3;
+              - lvgl.animimg.stop: truck_anim
+              - lvgl.widget.update:
+                  id: [btn_nav, btn_diag, btn_comms, btn_sys]
+                  state: {checked: false}
+              - lvgl.widget.update: {id: btn_sys, state: {checked: true}}
+              - lvgl.label.update: {id: screen_title, text: "// SYS // BOARD"}
+
+        - line:
+            x: 0
+            y: 287
+            points:
+              - 0, 0
+              - 480, 0
+            line_color: 0x4A2A00
+            line_width: 1
+        - line:
+            x: 120
+            y: 288
+            points:
+              - 0, 0
+              - 0, 32
+            line_color: 0x4A2A00
+            line_width: 1
+        - line:
+            x: 240
+            y: 288
+            points:
+              - 0, 0
+              - 0, 32
+            line_color: 0x4A2A00
+            line_width: 1
+        - line:
+            x: 360
+            y: 288
+            points:
+              - 0, 0
+              - 0, 32
+            line_color: 0x4A2A00
+            line_width: 1
+
+        # ------------------------------------------------------ startup
+        - obj:
+            id: startup_overlay
+            x: 0
+            y: 0
+            width: 480
+            height: 320
+            bg_color: 0x000000
+            bg_opa: COVER
+            border_width: 0
+            radius: 0
+            pad_all: 0
+            scrollable: false
+            clickable: true
+            widgets:
+              - image:
+                  id: startup_image
+                  src: startup_art
+                  x: 0
+                  y: 0
+              - obj:
+                  id: startup_cover
+                  x: 0
+                  y: 0
+                  width: 480
+                  height: 320
+                  bg_color: 0x000000
+                  bg_opa: COVER
+                  border_width: 0
+                  radius: 0
+                  pad_all: 0
+                  scrollable: false
+                  clickable: false
+              - image:
+                  id: startup_edge
+                  src: paint_edge_img
+                  x: -16
+                  y: 0
+
+  animations:
+    - id: startup_paint
+      duration: 1s
+      start_delay: 300ms
+      auto_start: true
+      timing:
+        - type: ease_out
+      widgets:
+        - id: startup_cover
+          x:
+            from: 0
+            to: 496
+        - id: startup_edge
+          x:
+            from: -16
+            to: 480
+      on_stop:
+        - delay: 3700ms
+        - lvgl.widget.hide: startup_overlay
+
+# ------------------------------------------------------------------- update
+interval:
+  # Fast loop: only the moving NAV instruments and the three attitude
+  # readouts.  Hidden pages are not touched.
+  - interval: 100ms
+    startup_delay: 4500ms
+    then:
+      - lambda: |-
+          const float t = (float) (cm::us() / 1000000.0);
+          id(g_speed)   = 62.0f + 3.0f * sinf(t * 0.31f) + 0.8f * sinf(t * 1.7f);
+          id(g_heading) = 311.0f + 4.0f * sinf(t * 0.11f);
+          id(g_alt)     = 4020.0f + 8.0f * sinf(t * 0.21f);
+          id(g_temp)    = 196.0f + 3.0f * sinf(t * 0.13f);
+          id(g_oil)     = 42.0f + 1.5f * sinf(t * 0.19f);
+          id(g_volt)    = 13.8f + 0.15f * sinf(t * 0.7f);
+          id(g_rpm)     = 2140.0f + 120.0f * sinf(t * 0.33f);
+          id(g_lat)    += 0.0000025f * cosf(t * 0.05f);
+          id(g_lon)    += 0.0000025f * sinf(t * 0.05f);
+          id(g_fuel)    = 70.0f - fmodf(t * 0.004f, 8.0f);
+          id(g_pitch)   = 8.0f * sinf(t * 0.7f);
+          id(g_yaw)     = 1.2f * sinf(t * 0.9f);
+          id(g_roll)    = 12.0f * sinf(t * 0.4f);
+          id(g_vac)     = 18.4f + 1.3f * sinf(t * 0.23f);
+          id(g_tps)     = 0.82f + 0.05f * sinf(t * 0.5f);
+          id(g_o2)      = 0.45f + 0.33f * sinf(t * 2.1f);
+          id(g_iac)     = 32.0f + 4.0f * sinf(t * 0.17f);
+          id(g_timing)  = 13.5f + 4.0f * sinf(t * 0.11f);
+          id(g_sats)    = 9;
+          id(g_hdop)    = 0.8f;
+
+          if (id(g_page) == 0) {
+            const int spd = (int) lroundf(id(g_speed));
+            const int sbase = (spd / 20) * 20;
+            const int soff = (int) lroundf((spd - sbase) / 20.0f * 30.0f);
+            if (sbase != id(g_speed_base)) {
+              char buf[48];
+              char *p = buf;
+              for (int k = 3; k >= -3; k--) {
+                int v = sbase + k * 20;
+                if (v < 0) v = 0;
+                p += snprintf(p, sizeof(buf) - (p - buf), "%d", v);
+                if (k > -3) *p++ = '\n';
+              }
+              *p = 0;
+              cm::text_raw(id(speed_tape), buf);
+              id(g_speed_base) = sbase;
+            }
+            cm::y(id(speed_tape), 29 + soff);
+            lv_obj_t *major[] = {id(spd_tick0), id(spd_tick1), id(spd_tick2),
+                                 id(spd_tick3), id(spd_tick4), id(spd_tick5),
+                                 id(spd_tick6)};
+            lv_obj_t *minor[] = {id(spd_min0), id(spd_min1), id(spd_min2),
+                                 id(spd_min3), id(spd_min4), id(spd_min5)};
+            for (int k = 0; k < 7; k++)
+              cm::y(major[k], 35 + soff + 30 * k);
+            for (int k = 0; k < 6; k++)
+              cm::y(minor[k], 50 + soff + 30 * k);
+            cm::text(id(speed_digital), "%03d", spd);
+
+            const int alt = (int) lroundf(id(g_alt));
+            const int abase = (alt / 100) * 100;
+            const int aoff = (int) lroundf((alt - abase) / 100.0f * 30.0f);
+            if (abase != id(g_alt_base)) {
+              char buf[48];
+              char *p = buf;
+              for (int k = 3; k >= -3; k--) {
+                int v = abase + k * 100;
+                if (v < 0) v = 0;
+                p += snprintf(p, sizeof(buf) - (p - buf), "%d", v);
+                if (k > -3) *p++ = '\n';
+              }
+              *p = 0;
+              cm::text_raw(id(alt_tape), buf);
+              id(g_alt_base) = abase;
+            }
+            cm::y(id(alt_tape), 29 + aoff);
+            lv_obj_t *amajor[] = {id(alt_tick0), id(alt_tick1), id(alt_tick2),
+                                  id(alt_tick3), id(alt_tick4), id(alt_tick5),
+                                  id(alt_tick6)};
+            lv_obj_t *aminor[] = {id(alt_min0), id(alt_min1), id(alt_min2),
+                                  id(alt_min3), id(alt_min4), id(alt_min5)};
+            for (int k = 0; k < 7; k++)
+              cm::y(amajor[k], 35 + aoff + 30 * k);
+            for (int k = 0; k < 6; k++)
+              cm::y(aminor[k], 50 + aoff + 30 * k);
+            cm::text(id(alt_digital), "%d,%03d", alt / 1000, alt % 1000);
+
+            const int heading = ((int) lroundf(id(g_heading)) % 360 + 360) % 360;
+            const int arc = ((int) lroundf(id(g_heading) / 10.0f) % 36 + 36) % 36;
+            if (arc != id(g_arc_idx)) {
+              id(g_arc_idx) = arc;
+              auto *img = id(compass_map).get(arc);
+              lv_image_set_src(id(compass_card_img), img->get_lv_image_dsc());
+            }
+            static const char *pts[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+            cm::text(id(arc_heading), "%03d° %s", heading, pts[((heading + 22) / 45) % 8]);
+
+            cm::text(id(gauge_roll_title), "ROLL %+.1f°", id(g_roll));
+            cm::text(id(gauge_pitch_title), "PITCH %+.1f°", id(g_pitch));
+            cm::rot(id(gauge_roll_truck), id(g_roll));
+            cm::rot(id(gauge_pitch_truck), -id(g_pitch));
+
+            cm::check(id(ind_speed), id(g_speed) > 85.0f);
+            cm::check(id(ind_temp), id(g_temp) > 220.0f);
+            cm::check(id(ind_tilt), fabsf(id(g_pitch)) > 6.0f || fabsf(id(g_roll)) > 9.0f);
+          }
+
+  # UI text / bars at 4 Hz.  This touches hidden labels too, so every page is
+  # current the instant it is shown; the expensive NAV drawing stays above.
+  - interval: 250ms
+    startup_delay: 4500ms
+    then:
+      - lambda: |-
+          cm::text(id(diag_cool), "%d F", (int) lroundf(id(g_temp)));
+          cm::text(id(diag_vac), "%.1f IN", id(g_vac));
+          cm::text(id(diag_tps), "%.2f V", id(g_tps));
+          cm::text(id(diag_o2), "%.2f V", id(g_o2));
+          cm::text(id(diag_iac), "%d", (int) lroundf(id(g_iac)));
+          cm::text(id(diag_timing), "%.1f°", id(g_timing));
+
+          cm::text(id(eng_val), "%d°F", (int) lroundf(id(g_temp)));
+          cm::text(id(oil_val), "%d PSI", (int) lroundf(id(g_oil)));
+          cm::text(id(bat_val), "%.1f V", id(g_volt));
+          cm::text(id(fuel_val), "%d%%", (int) lroundf(id(g_fuel)));
+          cm::text(id(rpm_val), "%d", (int) lroundf(id(g_rpm)));
+          cm::bar(id(eng_bar), (id(g_temp) - 120.0f) / 1.4f);
+          cm::bar(id(oil_bar), id(g_oil) / 0.8f);
+          cm::bar(id(bat_bar), (id(g_volt) - 10.0f) / 0.06f);
+          cm::bar(id(fuel_bar), id(g_fuel));
+          cm::bar(id(rpm_bar), id(g_rpm) / 60.0f);
+          cm::text(id(eng_status), id(g_temp) > 220.0f ? "HOT" : "OK");
+          cm::text(id(oil_status), id(g_oil) < 20.0f ? "LOW" : "OK");
+          cm::text(id(bat_status), id(g_volt) < 12.5f ? "LOW" : "CHG");
+          cm::text(id(fuel_status), "%d", (int) lroundf(id(g_fuel) * 4.6f));
+          cm::text(id(rpm_status), "4X4");
+
+          cm::text(id(hero_pitch), "%+.1f°", id(g_pitch));
+          cm::text(id(hero_roll), "%+.1f°", id(g_roll));
+          cm::text(id(hero_yaw), "%03d°", ((int) lroundf(id(g_heading)) % 360 + 360) % 360);
+
+          cm::text(id(sens_pitch), "%+.1f°", id(g_pitch));
+          cm::text(id(sens_yaw), "%+.1f°", id(g_yaw));
+          cm::text(id(sens_roll), "%+.1f°", id(g_roll));
+          cm::text(id(sens_cool), "%d F", (int) lroundf(id(g_temp)));
+          cm::text(id(sens_oil), "%d PSI", (int) lroundf(id(g_oil)));
+          cm::text(id(sens_fuel), "%d%%", (int) lroundf(id(g_fuel)));
+          cm::text(id(sens_volt), "%.1f V", id(g_volt));
+          cm::text(id(sens_sats), "%02d", id(g_sats));
+          cm::text(id(sens_hdop), "%.1f", id(g_hdop));
+
+          cm::text(id(mesh_rssi), "%d dBm", id(g_mesh_rssi));
+          cm::text(id(mesh_snr), "%.1f dB", id(g_mesh_snr));
+          cm::text(id(mesh_hops), "%d", id(g_mesh_hops));
+          cm::text(id(mesh_nodes), "%d", id(g_mesh_nodes));
+          const int packets = id(g_mesh_packets);
+          cm::text(id(mesh_packets), "%d,%03d", packets / 1000, packets % 1000);
+          uint64_t age = (cm::us() - id(g_mesh_last_us)) / 1000000ULL;
+          if (age > 5999) age = 5999;
+          cm::text(id(mesh_last), "%02u:%02u", (unsigned) (age / 60), (unsigned) (age % 60));
+
+  # Serial waterfall: one token every 300 ms.
+  - interval: 300ms
+    startup_delay: 4500ms
+    then:
+      - lambda: |-
+          static const char *S[] = {
+            "BOOT OK", "HEAP142K", "PSRAM 8M", "GPS 3D", "IMU100HZ",
+            "I2C 0x55", "TOUCH OK", "WIFI-67", "MESH RX", "UART115K",
+            "NVS OK", "LVGL OK", "RENIX OK", "FUEL 68%", "OIL 42P",
+            "TEMP196F", "HDOP 0.8", "SATS 09", "PKT12844", "ERR0.02",
+            "LOG 001", "WDOG OK", "ALT 4020", "HDG 311"
+          };
+          const size_t n = sizeof(S) / sizeof(S[0]);
+          auto count = [](const std::string &v) {
+            int c = 0;
+            for (char ch : v) if (ch == '\n') c++;
+            return c;
+          };
+          auto pop_last = [](std::string &v) {
+            if (!v.empty() && v.back() == '\n') v.pop_back();
+            auto p = v.rfind('\n');
+            std::string out = (p == std::string::npos) ? v : v.substr(p + 1);
+            if (p == std::string::npos) v.clear(); else v.erase(p);
+            return out;
+          };
+          id(g_serial_new) = std::string(S[id(g_serial_idx) % n]) + "\n" + id(g_serial_new);
+          id(g_serial_idx)++;
+          while (count(id(g_serial_new)) > 6)
+            id(g_serial_mid) = pop_last(id(g_serial_new)) + "\n" + id(g_serial_mid);
+          while (count(id(g_serial_mid)) > 6)
+            id(g_serial_old) = pop_last(id(g_serial_mid)) + "\n" + id(g_serial_old);
+          while (count(id(g_serial_old)) > 6)
+            pop_last(id(g_serial_old));
+          if (id(g_page) <= 1) {
+            cm::text_raw(id(serial_new), id(g_serial_new).c_str());
+            cm::text_raw(id(serial_mid), id(g_serial_mid).c_str());
+            cm::text_raw(id(serial_old), id(g_serial_old).c_str());
+          }
+
+  # Slower board health, clocks and network state.
+  - interval: 1s
+    startup_delay: 4500ms
+    then:
+      - lambda: |-
+          const uint32_t s = cm::seconds();
+          cm::text(id(hdr_mission), "T+ %02u:%02u:%02u",
+                   (unsigned) (s / 3600), (unsigned) ((s / 60) % 60), (unsigned) (s % 60));
+          cm::text(id(sys_uptime), "%02u:%02u:%02u",
+                   (unsigned) (s / 3600), (unsigned) ((s / 60) % 60), (unsigned) (s % 60));
+          cm::text(id(sys_heap), "%d KB", cm::internal_kb());
+          const int pk = cm::psram_kb();
+          cm::text(id(sys_psram), "%d.%d MB", pk / 1024, (pk % 1024) * 10 / 1024);
+          if (std::isnan(id(wifi_rssi).state))
+            cm::text(id(sys_rssi), "--");
+          else
+            cm::text(id(sys_rssi), "%d dBm", (int) lroundf(id(wifi_rssi).state));
+          const char *ip = id(wifi_ip).state.c_str();
+          cm::text_raw(id(sys_ip), ip[0] ? ip : "0.0.0.0");
+          cm::text(id(sens_mesh), "RX %d.%d KB/S", 12, (int) (s % 10));
+          cm::text(id(comms_rate), "%d.%d KB/S", 12, (int) (s % 10));
+
+  # Mesh feed.
+  - interval: 2s
+    startup_delay: 4500ms
+    then:
+      - lambda: |-
+          static const char *M[] = {
+            "[M01] K7ABC: ridge road clear",
+            "[M02] N0CALL: camp is up",
+            "[M03] W1XYZ: 2 hops, strong",
+            "[M04] K7ABC: fuel at 68%",
+            "[M05] N0CALL: copy that",
+            "[M06] W1XYZ: moving to 191",
+            "[M07] K7ABC: gate open",
+            "[M08] N0CALL: need water",
+            "[M09] W1XYZ: rssi -67",
+            "[M10] K7ABC: holding here"
+          };
+          const size_t n = sizeof(M) / sizeof(M[0]);
+          id(g_mesh_log) += M[id(g_mesh_idx) % n];
+          id(g_mesh_log) += "\n";
+          id(g_mesh_idx)++;
+          int lines = 0;
+          for (char c : id(g_mesh_log)) if (c == '\n') lines++;
+          while (lines > 10) {
+            auto p = id(g_mesh_log).find('\n');
+            if (p == std::string::npos) break;
+            id(g_mesh_log).erase(0, p + 1);
+            lines--;
+          }
+          id(g_mesh_last_us) = cm::us();
+          id(g_mesh_packets) += 3;
+          id(g_mesh_rssi) = -67 + (int) lroundf(2.0f * sinf(cm::seconds() / 3.0f));
+          id(g_mesh_snr) = 8.2f + 0.6f * sinf(cm::seconds() / 5.0f);
+          id(g_mesh_nodes) = 14;
+          id(g_mesh_hops) = 2 + (int) (cm::seconds() / 60) % 2;
+          cm::text_raw(id(mesh_log), id(g_mesh_log).c_str());
+
+# ------------------------------------------------------------- GPS (sketch)
+# The real module is not fitted yet. When it is, wire its TX to GPIO44 and
+# uncomment this block; the UI will keep its simulated feed until you swap the
+# lambda data sources over to the gps sensors.
+#
+# uart:
+#   - id: gps_uart
+#     rx_pin: GPIO44
+#     tx_pin: GPIO43
+#     baud_rate: 9600
+#
+# gps:
+#   - uart_id: gps_uart
+#     id: gps_module
+
+# ----------------------------------------------------------- MESH (sketch)
+# Second ESP32 running Meshtastic or MeshCore, over UART1. The UI simulates
+# the link today; the auto-detect banner is already in the COMMS layout.
+# Provisional pins until the harness is traced: RX GPIO17, TX GPIO18, 115200.
+#
+# uart:
+#   - id: mesh_uart
+#     rx_pin: GPIO17
+#     tx_pin: GPIO18
+#     baud_rate: 115200

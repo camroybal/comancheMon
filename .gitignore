@@ -1,0 +1,12 @@
+# ESPHome build artifacts
+firmware/.esphome/
+.cache/
+.esphome/
+
+# secrets
+firmware/secrets.yaml
+
+# Python
+.venv/
+__pycache__/
+*.pyc
